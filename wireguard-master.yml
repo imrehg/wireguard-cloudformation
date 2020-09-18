@@ -1,0 +1,218 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Set up a wireguard VPN"
+
+Parameters:
+  VpnAmiId:
+    Description: "Provide the AWS Marketplace VPN AMI ID"
+    Default: "ami-0823c236601fef765"
+    # Default: "ami-06fd8a495a537da8b"
+    Type: "AWS::EC2::Image::Id"
+  SshKey:
+    Description: "Previously created ssh key"
+    Default: "ce-gergely"
+    Type: "String"
+  InstanceType:
+    Default: "t2.nano"
+    Description: "Instance type"
+    Type: "String"
+  ServerTunnelSubnet:
+    Default: "10.55.10.1/24"
+    Description: "The network available to the tunnel."
+    Type: "String"
+  PeerTunnelSubnet:
+    Default: "10.55.10.2/32"
+    Description: "The possible tunnel peers. One is the default"
+    Type: "String"
+  VpnSecurityGroupID:
+   Description: "The VPC default Security GroupID"
+   Type: "AWS::EC2::SecurityGroup::Id"
+   Default: "sg-4725cb35"
+  AssociateEip:
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "true"
+    Description: "This is to associate with an already created/exported EIP. Should be true unless testing."
+    Type: "String"
+
+Conditions:
+  CreateAssociateEip: !Equals [!Ref "AssociateEip", "true"]
+
+Resources:
+
+  WireguardEIP:
+    Type: AWS::EC2::EIP
+
+  # Compute
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.55.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpc'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    DependsOn: VPC
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref VPC
+        CidrBlock: 10.55.10.0/24
+        AvailabilityZone: !Select [ 0, !GetAZs ]    # Get the first AZ in the list
+        Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-publicA'
+
+  VpnSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "VPN security group created by cloudformation"
+      GroupName: !Sub '${AWS::StackName} VPN access'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: 22
+          ToPort: 22
+          CidrIp: "0.0.0.0/0"
+          Description: SSH access
+        - IpProtocol: "udp"
+          FromPort: 51820
+          ToPort: 51820
+          CidrIp: "0.0.0.0/0"
+          Description: Wireguard port
+
+  ConfigStorageSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Storage Security group"
+      GroupName: !Sub '${AWS::StackName}-vpn-nfs'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref VpnSecurityGroup
+          Description: NFS/EFS connection
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub '${AWS::StackName}-public'
+
+  PublicRoute1:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  VpnInstance:
+    Type: "AWS::EC2::Instance"
+    DependsOn: ConfigStoreMount
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            apt:
+              wireguard: []
+              nfs-common: []
+          files:
+            /root/setup-wireguard.sh:
+              content: !Sub |
+                #!/bin/bash -ex
+                cd /etc/wireguard
+                umask 077
+                wg genkey | tee privatekey | wg pubkey > publickey
+                PRIVATEKEY=$(cat privatekey)
+                rm privatekey publickey
+
+                cat <<EOF > "/etc/wireguard/wg0.conf"
+                [Interface]
+                PrivateKey = $PRIVATEKEY
+                Address = 192.168.6.1/24
+                ListenPort = 51820
+                PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE; ip6tables -A FORWARD -i wg0 -j ACCEPT; ip6tables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+                PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE; ip6tables -D FORWARD -i wg0 -j ACCEPT; ip6tables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+                SaveConfig = true
+                EOF
+
+              mode: "000777"
+              owner: root
+              group: root
+    Properties:
+      # ImageId: !Ref "VpnAmiId"
+      ImageId: "ami-06fd8a495a537da8b"
+      InstanceType: !Ref "InstanceType"
+      KeyName: !Ref "SshKey"
+      SubnetId: !Ref "PublicSubnetA"
+      SecurityGroupIds:
+        - !Ref VpnSecurityGroup
+      Tags:
+      - Key: Name
+        Value: !Sub '${AWS::StackName} server'
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -ex
+          mount -t nfs -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 10.55.10.200:/ /etc/wireguard
+          if [ ! -f "/etc/wireguard/wg0.conf" ]; then bash "/root/setup-wireguard.sh" ; fi
+          sudo ufw allow 22/tcp
+          sudo ufw allow 51820/udp
+          sudo ufw enable
+          systemctl enable wg-quick@wg0
+          systemctl start wg-quick@wg0
+
+  WireguardVpnEipAsso:
+    Type: "AWS::EC2::EIPAssociation"
+    Condition: "CreateAssociateEip"
+    Properties:
+      AllocationId: !GetAtt WireguardEIP.AllocationId
+      InstanceId: !Ref "VpnInstance"
+
+  ConfigStore:
+    Type: AWS::EFS::FileSystem
+    Properties: 
+      BackupPolicy: 
+        Status: DISABLED
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      FileSystemTags:
+      - Key: Name
+        Value: !Sub '${AWS::StackName} server'
+
+        
+  ConfigStoreMount:
+    Type: AWS::EFS::MountTarget
+    Properties: 
+      FileSystemId: !Ref ConfigStore
+      IpAddress: "10.55.10.200"
+      SecurityGroups: 
+        - !Ref ConfigStorageSecurityGroup
+      SubnetId: !Ref "PublicSubnetA"
+
+Outputs:
+  PublicIPAddress:
+    Description: Public EIP IP Address
+    Value: !Ref WireguardEIP
+    Export:
+      Name: PublicIPAddress
