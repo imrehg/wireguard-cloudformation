@@ -1,78 +1,142 @@
-Launch EC2 Instance with Wireguard
-==================================
+# Launch an EC2 Instance with Wireguard
 
-This [Cloudformation](https://aws.amazon.com/cloudformation/) creates a personal [Wireguard](https://www.wireguard.com/) VPN server in AWS. I assume a cursory understanding of AWS, Cloudformation and EC2 with existing ssh key.
+This [Cloudformation](https://aws.amazon.com/cloudformation/) creates a personal [Wireguard](https://www.wireguard.com/) VPN server in AWS. It assumes a cursory understanding of AWS, Cloudformation and EC2 with existing SSH key.
 
-You will need the following:
+## Cloud resources
 
-* Launch the `wireguard-eip-master.json` template first. It will export the elastic IP used by the `wireguard-master.json`template (so you can conveniently use the same public IP).
-* Your VPC's default security group ID
+This template will create roughly the following resources to run the Wireguard server:
 
-Of Note:
+* an elastic IP to use with your VPN (and be stable over server deploys)
+* networking infrastructure (a new VPC, subnets, security groups, internet gateway, ...)
+* an EFS network drive to store the server configuration in
+* an EC2 instance running the server itself
 
-* The default AMI is Amazon Linux 2
-* This sets up the server as a DNS resolver with unbound to prevent [DNS leaking](http://dnsleak.com/)
+## Usage
 
-Steps:
-
-* After the cloudformation is deployed and server has rebooted as required ssh into it and start wireguard
-    ```
-    wg-quick up wg0
-    ```
-* Then get the client config and paste it into your client's configuration
-    ```
-    sudo cat /tmp/wg0-client.conf
-    ```
-
-Todo:
-
-* Parameterize some of the unbound configuration and IP addresses.
+Deploy the template to your AWS, with some parameters added. The deployment can be done like this using the [AWS CLI](https://aws.amazon.com/cli/):
 
 
+```shell
+aws cloudformation deploy \
+    --stack-name <stackname> \
+    --template-file wireguard.yml \
+    --parameter-overrides SshKey=<sshkey-name> VpnAmiId=<ami-id>
+```
 
-aws cloudformation create-stack --stack-name wireguardtest --template-body "$(cat wireguard-eip-master.yml)"
+Here you have to add your SSH key, which was already created or imported into AWS. (If no such key yet, you can do that in EC2 / Network & Security / Key Pairs. You will also likely need to define an Ubuntu 20.04 Amazon Machine Image (AMI) ID. For example:
 
+For example
 
-date +"%Y-%m-%d-%H-%M-%S"
+```shell
+aws cloudformation deploy \
+    --stack-name wireguard \
+    --template-file wireguard.yml \
+    --parameter-overrides SshKey=default VpnAmiId=ami-06fd8a495a537da8b
+```
 
-aws cloudformation create-change-set --stack-name wireguardtest --change-set-name "cs-$(date +"%Y-%m-%d-%H-%M-%S")" --template-body "$(cat wireguard-eip-master.yml)" 
+You can see your resources created in CloudFormation. Once your instance up and running, grab the elastic IP address now attached to it, and log in:
 
-aws cloudformation create-change-set --stack-name wireguardtest --change-set-name "cs-$(date +"%Y-%m-%d-%H-%M-%S")" --template-body "$(cat wireguard-master.yml)" --parameters ParameterKey=VpnSecurityGroupID,ParameterValue=sg-4725cb35 ParameterKey=SshKey,ParameterValue=key-09e181872fda45908 ParameterKey=VpnAmiId,ParameterValue=ami-06fd8a495a537da8b 
+```shell
+ssh -i "<sshkey-path>" -o "UserKnownHostsFile=/dev/null" ubuntu@<elasitic-ip>
+```
 
-aws cloudformation deploy --stack-name wireguardtest --template-file wireguard-master.yml --parameters ParameterKey=VpnSecurityGroupID,ParameterValue=sg-4725cb35 ParameterKey=SshKey,ParameterValue=key-09e181872fda45908 ParameterKey=VpnAmiId,ParameterValue=ami-06fd8a495a537da8b
+for example:
 
+```shell
+ssh -i "~/.ssh/aws/default.pem" -o "UserKnownHostsFile=/dev/null" ubuntu@1.2.3.4
+```
 
-https://www.linode.com/docs/networking/vpn/set-up-wireguard-vpn-on-ubuntu/
+Depending whether the server setup as finished yet or not, you might want to check the logs (in `/var/log/cloud-init-output.log`), or just wait a bit. Once the setup has completed, the Wireguard server should be set up and running, and can check that with the command line tool:
 
+```shell
+ubuntu@ip-A-B-C-D:~$ sudo wg
+interface: wg0
+  public key: ZLXKOMWY0KMcmWM2GOHjFYxCCileo7nzMU5qf4A2Ngo=
+  private key: (hidden)
+  listening port: 51820
+```
 
-Install
+To set up a client, the easiest is doing everything on the server first, and then passing on all the information to the client.
 
-sudo add-apt-repository ppa:wireguard/wireguard
-<!-- sudo apt install wireguard -->
+```shell
+sudo wg set wg0 peer <publickey> allowed-ips <clientip>/32
+```
 
+To fill in the relevant details first pick a client IP to be used with this client (within the subnet set by `ServerTunnelSubnet` variable in the template), say `10.20.10.10` (a different IP for each client).
 
+Then generate a pair of public and private keys on the server (a different pair for each client):
 
-https://www.flockport.com/guides/build-wireguard-networks
+```shell
+wg genkey | tee privatekey | wg pubkey > publickey
+```
 
+and create a new peer in the server configuration with these values, say:
 
-sudo mount -t nfs -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 10.55.10.21:/  /tmp/remote
+```shell
+sudo wg set wg0 peer $(cat publickey) allowed-ips 10.20.10.10/32
+```
 
-sudo mount -t nfs -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 10.55.10.200:/  /tmp/remote
+After this you should be able to see the client listed in the server's status:
 
-Autoscaling group for debug instance? But how about elastic IP?
+```
+ubuntu@ip-A-B-C-D:~$ sudo wg
+  public key: ZLXKOMWY0KMcmWM2GOHjFYxCCileo7nzMU5qf4A2Ngo=
+  private key: (hidden)
+  listening port: 51820
 
-### Internal
+peer: XD/0m56n4dzaTWWhD12nhp8uo5sMKqXlUk1BiVIGehk=
+  allowed ips: 10.20.10.10/32
+```
 
-https://faculty-internal.slack.com/archives/GJ0NNPN75/p1600420604005500
+Then create a client connection file with content like this:
 
-#### Questions
+```ini
+[Interface]
+PrivateKey = <publickey>
+Address = <clientip>/32
+DNS = 1.1.1.1, 8.8.8.8, 8.8.4.4
 
-Why autoscaling? Does it really use a lot of resources?
-Should store data in EFS? Or S3? Should it store anything?
-How's best to add ssh keys the best way with templates? Secrets storage? Or pulling in public keys from somewhere? Or have any other kind of interface to change wireguard settings?
-Ubuntu or Amazon Linux or Debian or something else?
+[Peer]
+PublicKey = <serverpublickey>
+AllowedIPs = 0.0.0.0/0
+Endpoint = <elasticip>:<wireguardport>
+```
 
+For example:
 
-Protocol to exchange keys without sharing public information?
+```ini
+[Interface]
+PrivateKey = sHVNBQQIiQ65pPZGuwCjcIIhr1EkGDqUnR1M5lPMeHM=
+Address = 10.20.10.10/32
+DNS = 1.1.1.1, 8.8.8.8, 8.8.4.4
 
-How to deploy to an existing subnet? Does it need any default securitygroup as well?
+[Peer]
+PublicKey = KlIdKco2QXj/2Qy66wAPSAle/KgJOTGuLv4eS5da9gg=
+AllowedIPs = 0.0.0.0/0
+Endpoint = 34.253.53.124:51820
+```
+
+On the client [install Wireguard](https://www.wireguard.com/install/) and import the above connection file. Once the client is connected, on the server you should see handshake and traffic information, such as:
+
+```shell
+ubuntu@ip-A-B-C-D:~$ sudo wg
+interface: wg0
+  public key: ZLXKOMWY0KMcmWM2GOHjFYxCCileo7nzMU5qf4A2Ngo=
+  private key: (hidden)
+  listening port: 51820
+
+peer: XD/0m56n4dzaTWWhD12nhp8uo5sMKqXlUk1BiVIGehk=
+  endpoint: XX.XX.XX.XX:36429
+  allowed ips: 10.20.10.10/32
+  latest handshake: 8 seconds ago
+  transfer: 148 B received, 92 B sent
+```
+
+The client should be then routing all traffic through the VPN. You can check this for example by going to [https://ipinfo.tw/](https://ipinfo.tw/) or any other page to check your current public IP address. It should show the elastic IP attached to your W
+
+### Links
+
+Inspirations for this deployment code:
+
+* https://github.com/tripleonard/wireguard-cloudformation
+* https://github.com/rupertbg/aws-wireguard-linux

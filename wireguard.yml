@@ -4,29 +4,27 @@ Description: "Set up a wireguard VPN"
 Parameters:
   VpnAmiId:
     Description: "Provide the AWS Marketplace VPN AMI ID"
-    Default: "ami-0823c236601fef765"
-    # Default: "ami-06fd8a495a537da8b"
+    Default: "ami-06fd8a495a537da8b"
     Type: "AWS::EC2::Image::Id"
   SshKey:
-    Description: "Previously created ssh key"
-    Default: "ce-gergely"
-    Type: "String"
+    Description: "Previously created ssh key name"
+    Type: "AWS::EC2::KeyPair::KeyName"
+    ConstraintDescription: "must be the name of an existing EC2 KeyPair."
   InstanceType:
-    Default: "t2.nano"
+    Default: "t3a.nano"
     Description: "Instance type"
     Type: "String"
+    AllowedValues: ["t3a.nano", "t3.nano"]
   ServerTunnelSubnet:
-    Default: "10.55.10.1/24"
+    Default: "10.20.10.1/24"
     Description: "The network available to the tunnel."
     Type: "String"
-  PeerTunnelSubnet:
-    Default: "10.55.10.2/32"
-    Description: "The possible tunnel peers. One is the default"
-    Type: "String"
-  VpnSecurityGroupID:
-   Description: "The VPC default Security GroupID"
-   Type: "AWS::EC2::SecurityGroup::Id"
-   Default: "sg-4725cb35"
+  WireguardPort:
+    Default: 51820
+    Description: "The port on which the WireGuard server will listen on"
+    Type: Number
+    MinValue : 1150
+    MaxValue : 65535
   AssociateEip:
     AllowedValues:
       - "true"
@@ -40,14 +38,14 @@ Conditions:
 
 Resources:
 
+  # Networking
   WireguardEIP:
     Type: AWS::EC2::EIP
 
-  # Compute
   VPC:
     Type: AWS::EC2::VPC
     Properties:
-      CidrBlock: 10.55.0.0/16
+      CidrBlock: 10.30.0.0/16
       EnableDnsSupport: true
       EnableDnsHostnames: true
       InstanceTenancy: default
@@ -68,7 +66,7 @@ Resources:
       Type: AWS::EC2::Subnet
       Properties:
         VpcId: !Ref VPC
-        CidrBlock: 10.55.10.0/24
+        CidrBlock: 10.30.10.0/24
         AvailabilityZone: !Select [ 0, !GetAZs ]    # Get the first AZ in the list
         Tags:
         - Key: Name
@@ -87,8 +85,8 @@ Resources:
           CidrIp: "0.0.0.0/0"
           Description: SSH access
         - IpProtocol: "udp"
-          FromPort: 51820
-          ToPort: 51820
+          FromPort: !Ref WireguardPort
+          ToPort: !Ref WireguardPort
           CidrIp: "0.0.0.0/0"
           Description: Wireguard port
 
@@ -127,19 +125,33 @@ Resources:
       SubnetId: !Ref PublicSubnetA
       RouteTableId: !Ref PublicRouteTable
 
+  # Compute
   VpnInstance:
     Type: "AWS::EC2::Instance"
     DependsOn: ConfigStoreMount
-    Metadata:
-      AWS::CloudFormation::Init:
-        config:
+    Properties:
+      ImageId: !Ref "VpnAmiId"
+      InstanceType: !Ref "InstanceType"
+      KeyName: !Ref "SshKey"
+      SubnetId: !Ref "PublicSubnetA"
+      SecurityGroupIds:
+        - !Ref VpnSecurityGroup
+      SourceDestCheck: false
+      Tags:
+      - Key: Name
+        Value: !Sub '${AWS::StackName} server'
+      UserData:
+        Fn::Base64: !Sub |
+          #cloud-config
+          repo_update: true
+          repo_upgrade: all
+
           packages:
-            apt:
-              wireguard: []
-              nfs-common: []
-          files:
-            /root/setup-wireguard.sh:
-              content: !Sub |
+          - wireguard
+          - nfs-common
+
+          write_files:
+            - content: |
                 #!/bin/bash -ex
                 cd /etc/wireguard
                 umask 077
@@ -150,37 +162,45 @@ Resources:
                 cat <<EOF > "/etc/wireguard/wg0.conf"
                 [Interface]
                 PrivateKey = $PRIVATEKEY
-                Address = 192.168.6.1/24
-                ListenPort = 51820
-                PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE; ip6tables -A FORWARD -i wg0 -j ACCEPT; ip6tables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-                PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE; ip6tables -D FORWARD -i wg0 -j ACCEPT; ip6tables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+                Address = ${ServerTunnelSubnet}
+                ListenPort = ${WireguardPort}
+                PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o ens5 -j MASQUERADE;
+                PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o ens5 -j MASQUERADE;
                 SaveConfig = true
                 EOF
+              path: /root/wireguard-setup.sh
+              permissions: '0777'
+            - content: |
+                [Unit]
+                Description = Mount remote Wireguard config store
 
-              mode: "000777"
-              owner: root
-              group: root
-    Properties:
-      # ImageId: !Ref "VpnAmiId"
-      ImageId: "ami-06fd8a495a537da8b"
-      InstanceType: !Ref "InstanceType"
-      KeyName: !Ref "SshKey"
-      SubnetId: !Ref "PublicSubnetA"
-      SecurityGroupIds:
-        - !Ref VpnSecurityGroup
-      Tags:
-      - Key: Name
-        Value: !Sub '${AWS::StackName} server'
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash -ex
-          mount -t nfs -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 10.55.10.200:/ /etc/wireguard
-          if [ ! -f "/etc/wireguard/wg0.conf" ]; then bash "/root/setup-wireguard.sh" ; fi
-          sudo ufw allow 22/tcp
-          sudo ufw allow 51820/udp
-          sudo ufw enable
-          systemctl enable wg-quick@wg0
-          systemctl start wg-quick@wg0
+                [Mount]
+                What=10.30.10.200:/
+                Where=/etc/wireguard
+                Type=nfs
+                Options=nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport
+                # Uncomment the below if your server is real slow
+                # TimeoutSec=600
+
+                [Install]
+                WantedBy=multi-user.target
+              path: /etc/systemd/system/etc-wireguard.mount
+            - content: |
+                net.ipv4.conf.all.forwarding = 1
+                net.ipv6.conf.all.forwarding = 1
+              path: /etc/sysctl.d/wg.conf
+
+          runcmd:
+          - sysctl --system
+          - systemctl enable etc-wireguard.mount
+          - systemctl start etc-wireguard.mount
+          - if [ ! -f "/etc/wireguard/wg0.conf" ]; then /root/wireguard-setup.sh ; fi
+          - ufw allow 22/tcp
+          - ufw allow ${WireguardPort}/udp
+          - ufw --force enable
+          - sed -i "s/^\(After\|Wants\)=.*/& etc-wireguard.mount/" /lib/systemd/system/wg-quick@.service
+          - systemctl enable wg-quick@wg0
+          - systemctl start wg-quick@wg0
 
   WireguardVpnEipAsso:
     Type: "AWS::EC2::EIPAssociation"
@@ -189,6 +209,7 @@ Resources:
       AllocationId: !GetAtt WireguardEIP.AllocationId
       InstanceId: !Ref "VpnInstance"
 
+  # Storage
   ConfigStore:
     Type: AWS::EFS::FileSystem
     Properties: 
@@ -200,19 +221,12 @@ Resources:
       - Key: Name
         Value: !Sub '${AWS::StackName} server'
 
-        
+
   ConfigStoreMount:
     Type: AWS::EFS::MountTarget
     Properties: 
       FileSystemId: !Ref ConfigStore
-      IpAddress: "10.55.10.200"
+      IpAddress: "10.30.10.200"
       SecurityGroups: 
         - !Ref ConfigStorageSecurityGroup
       SubnetId: !Ref "PublicSubnetA"
-
-Outputs:
-  PublicIPAddress:
-    Description: Public EIP IP Address
-    Value: !Ref WireguardEIP
-    Export:
-      Name: PublicIPAddress
