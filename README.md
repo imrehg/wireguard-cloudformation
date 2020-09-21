@@ -2,6 +2,8 @@
 
 This [Cloudformation](https://aws.amazon.com/cloudformation/) creates a personal [Wireguard](https://www.wireguard.com/) VPN server in AWS. It assumes a cursory understanding of AWS, Cloudformation and EC2 with existing SSH key.
 
+**Note** that this is just one setup that I found quick and easy to work with, it is not production level deployment, will need to know a thing or two about server maintenance & wireguard. On the other hand, it's likely as simplified (architecturewise) & cheap as it can get to run a Wireguard server on AWS (please let me know if you disagree / have feedback on this! :)
+
 ## Cloud resources
 
 This template will create roughly the following resources to run the Wireguard server:
@@ -136,7 +138,7 @@ The client should be then routing all traffic through the VPN. You can check thi
 
 ### Links
 
-Inspirations for this deployment code:
+Inspirations for this deployment code, much thanks for them 🙇‍♂️:
 
 * https://github.com/tripleonard/wireguard-cloudformation
 * https://github.com/rupertbg/aws-wireguard-linux
