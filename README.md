@@ -134,7 +134,7 @@ peer: XD/0m56n4dzaTWWhD12nhp8uo5sMKqXlUk1BiVIGehk=
   transfer: 148 B received, 92 B sent
 ```
 
-The client should be then routing all traffic through the VPN. You can check this for example by going to [https://ipinfo.tw/](https://ipinfo.tw/) or any other page to check your current public IP address. It should show the elastic IP attached to your W
+The client should be then routing all traffic through the VPN. You can check this for example by going to [https://ipinfo.tw/](https://ipinfo.tw/) or any other page to check your current public IP address. It should show the elastic IP attached to your Wireguard instance.
 
 ### Links
 
