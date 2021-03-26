@@ -230,3 +230,10 @@ Resources:
       SecurityGroups: 
         - !Ref ConfigStorageSecurityGroup
       SubnetId: !Ref "PublicSubnetA"
+
+Outputs:
+  PublicIP:
+    Description: The public IP address of the deployed VPN
+    Value: !Ref WireguardEIP
+    Export:
+      Name: !Sub 'public-ip-${AWS::StackName}'
